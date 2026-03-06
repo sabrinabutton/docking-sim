@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.optimize import minimize
 from .path import ManeuverGenerator
-from .data import OtterState, Pose, PointType, Status
+from .data import OtterState, Pose
 
 NUM_PATH_PARAMS = 4 # Constant and baked in, just made into a constant for readability
 
@@ -64,8 +64,8 @@ class MPCController:
         
         
     # TODO: PROBLEM: It cannot actually solve this!
-    def _objective(self, path_u_flattened, state:OtterState, maneuver, dock_point, status):
-        path_params, u_flattened = path_u_flattened[:(NUM_PATH_PARAMS )], path_u_flattened[(NUM_PATH_PARAMS):]
+    def _objective(self, path_u_flattened, state:OtterState, maneuver, dock_point):
+        path_params, u_flattened = path_u_flattened[:(NUM_PATH_PARAMS)], path_u_flattened[(NUM_PATH_PARAMS):]
         u_traj = u_flattened.reshape((self.config.lookahead_steps, 2))
         
         temp_state = state.copy()
@@ -77,7 +77,7 @@ class MPCController:
         # penalize phases differently 
         # For delta: Deadband as you get far away or Median vs achievement bubble to penalize 
         
-        new_maneuver = self.mgen.get_docking_maneuver(Pose(state.x, state.y, state.psi, PointType.SETUP), dock_point, path_params, status)
+        new_maneuver = self.mgen.get_docking_maneuver(Pose(state.x, state.y, state.psi), dock_point, path_params)
         
         for i in range(self.config.lookahead_steps):
             k1 = self._otter_model(temp_state, u_traj[i])
@@ -111,13 +111,13 @@ class MPCController:
         else:
             return np.array([0.0, 0.0])
         
-    def solve(self, state: OtterState, dock_point:Pose, maneuver, status):
+    def solve(self, state: OtterState, dock_point:Pose, maneuver):
         guess = np.append(self.path_params_guess, self.u_guess_flattened)
 
         path_bounds = [(1.0, 20.0), (1.0, 20.0), (0.1, 2.0), (0.1, 2.0)]  # l_a, l_b, c_a, c_b
         control_bounds = [(-100, 100)] * (self.config.lookahead_steps * 2)
         bounds = path_bounds + control_bounds
-        optimum = minimize(self._objective, guess, args=(state, maneuver, dock_point, status), method='SLSQP', bounds=bounds)
+        optimum = minimize(self._objective, guess, args=(state, maneuver, dock_point), method='SLSQP', bounds=bounds)
         
         if optimum.success: # If we achieve convergence to a local minima
             # Seperate the path and the thruster inputs
@@ -132,7 +132,7 @@ class MPCController:
             best_path_params = [10, 10, 1, 1]
             best_u = [0, 0]
             
-        best_maneuver =  self.mgen.get_docking_maneuver(Pose(state.x, state.y, state.psi, PointType.SETUP), dock_point, best_path_params, status)
+        best_maneuver =  self.mgen.get_docking_maneuver(Pose(state.x, state.y, state.psi), dock_point, best_path_params)
             
         return best_u, best_maneuver
 

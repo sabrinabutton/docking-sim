@@ -1,67 +1,62 @@
 import numpy as np
-from .data import Pose, PointType, Status
+from .data import Pose
+
+APPROACH_LENGTH = 5
+BERTH_LENGTH = 5
+TOTAL_LENGTH = APPROACH_LENGTH + BERTH_LENGTH
+
+# Param order
+R_APPROACH_IDX = 0
+THETA_APPROACH_IDX = 1
+R_BERTH_IDX = 2
+THETA_BERTH_IDX = 3
 
 class ManeuverGenerator:
     
     def __init__(self, config):
         self.config = config.maneuver_generator
-        
-    def _get_arc(self, l, c, start, reverse=False):
-        r = (c / 2) + (l**2 / (8 * c))
-        direction = -1 if reverse else 1
-        
-        center_x = start.x - (direction * r * np.sin(start.psi))
-        center_y = start.y + (direction * r * np.cos(start.psi))
+    
+    def _get_arc(end, r, theta, pts):
+        if pts <= 0:
+            return []
 
-        anchor_angle = np.arctan2(start.y - center_y, start.x - center_x)
-        delta_angle = 2 * np.arcsin(l / (2 * r))
+        # Determine the ICC based on the ENDPOINT pose
+        center_x = end.x - (r * np.sin(end.psi))
+        center_y = end.y + (r * np.cos(end.psi))
+
+        # Determine the angular coordinate of the ENDPOINT relative to the ICC
+        end_angle = np.arctan2(end.y - center_y, end.x - center_x)
+        angles = np.linspace(end_angle - theta, end_angle, int(pts))
         
-        angles = np.linspace(
-            anchor_angle - (direction * delta_angle) if reverse else anchor_angle,
-            anchor_angle if reverse else anchor_angle + delta_angle,
-            self.config.interpolation_count
-        )
+        r_mag = np.abs(r)
+        direction = np.copysign(1.0, r)
         
-        return [
+        return np.array([
             Pose(
-                x = center_x + r * np.cos(a),
-                y = center_y + r * np.sin(a),
-                psi = a + (direction * np.pi / 2),
-                p_type = PointType.APPROACH if reverse else PointType.BERTH
+                x = center_x + r_mag * np.cos(a),
+                y = center_y + r_mag * np.sin(a),
+                psi = a + (direction * np.pi / 2)
             )
             for a in angles
-        ]
+        ])
+    
+    def generate_maneuver(self, dock_point, point_idx_achieved, r_approach, theta_approach, r_berth, theta_berth):
+        pts_approach = max(0, (APPROACH_LENGTH - 1) - point_idx_achieved)
+        pts_berth = max(0, min(BERTH_LENGTH, TOTAL_LENGTH - 1 - point_idx_achieved))
         
-    def _get_start_to_approach(self, start_point, approach_entry):
-        xs = np.linspace(start_point.x, approach_entry.x, self.config.interpolation_count)
-        ys = np.linspace(start_point.y, approach_entry.y, self.config.interpolation_count)
-        psis = np.linspace(start_point.psi, approach_entry.psi, self.config.interpolation_count)
+        berth = self._get_arc(dock_point, r_berth, theta_berth, pts_berth)
         
-        start_to_approach = [
-            Pose(x=x, y=y, psi=p, p_type=PointType.SETUP) 
-            for x, y, p in zip(xs, ys, psis)
-        ]
+        if(berth.size == 0):
+            print("Failure. Berth couldn't generate a path.")
         
-        return start_to_approach
+        approach = self._get_arc(berth[0], r_approach, theta_approach, pts_approach)
         
-        
-    def _get_docking_maneuver(self, start_point, dock_point, l_a, l_b, c_a, c_b, verbose=True, status:Status=Status.START):    
-        berth_arc = self._get_arc(l_b, c_b, dock_point)
-        berth_point = berth_arc[-1]
-        approach_arc = self._get_arc(l_a, c_a, berth_point, reverse=True)
-        approach_point = approach_arc[0]
-        start_to_approach = self._get_start_to_approach(start_point, approach_point)
-        
-        path = []
-        
-        if status <= Status.START: path += start_to_approach
-        if status <= Status.SETUP_ACHIEVED: path += approach_arc
-        if status <= Status.APPROACH_ACHIEVED: path += berth_arc[::-1]
-        
-        return path
-        
-    def get_docking_maneuver(self, start_point, dock_point, params, status:Status=Status.START):
-        return self._get_docking_maneuver(start_point, dock_point, params[0], params[1], params[2], params[3])
+        return approach + berth
+    
+    def generate_maneuver(self, dock_point, point_idx_achieved, params):
+        # Assume params are in order
+        return self.generate_maneuver(dock_point, point_idx_achieved, 
+                                      params[R_APPROACH_IDX], params[THETA_APPROACH_IDX], params[R_BERTH_IDX], params[THETA_BERTH_IDX])
     
     
         

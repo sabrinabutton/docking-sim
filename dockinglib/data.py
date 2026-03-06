@@ -1,23 +1,12 @@
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 
-class PointType(Enum):
-    SETUP = 1
-    APPROACH = 2
-    BERTH = 3
-    
-class Status(IntEnum):
-    START = 1
-    SETUP_ACHIEVED = 2
-    APPROACH_ACHIEVED = 3
-    DONE = 4
     
 @dataclass
 class Pose:
     x: float
     y: float
     psi: float
-    p_type: PointType
     
 @dataclass
 class OtterState:
@@ -27,6 +16,7 @@ class OtterState:
     surge: float
     sway: float
     yaw_rate: float
+    point_idx_achieved: int = -1
     
     def copy(self):
         return OtterState(self.x, self.y, self.psi,
