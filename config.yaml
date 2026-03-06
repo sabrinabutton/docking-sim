@@ -1,0 +1,43 @@
+# Editing this config file will change algo behaviour/simulation
+maneuver_generator: 
+  interpolation_count: 10
+  max_curvature: 0.6 # TODO: need to add these bounds to solver
+  min_arc_length: 3.0
+
+mpc:
+  lookahead_steps: 12
+  dt: 0.1
+  max_solver_iterations: 150
+  
+weights:
+  maneuver_length: 50.0 #TODO: Implement
+  curvature_violation: 50.0 #TODO: Implement
+  cross_track: 600.0
+  heading: 45.0
+  angular_velocity: 12.0
+  control_effort: 0.05
+
+simulation:
+  total_timesteps: 500
+  integration_step: 0.1
+  enable_noise: true
+  start_state: 
+    x: 0.0
+    y: 0.0
+    psi: 0.0
+    surge: 0.0
+    sway: 0.0
+    yaw_rate: 0.0
+  dock_pose: 
+    x: 1.0
+    y: 1.0
+    psi: 0.0
+    p_type: START
+  disturbance_amplitude_x: 0.2
+  disturbance_amplitude_y: -0.3
+  waypoint_tolerance: 0.2
+
+visualizer:
+  timestep_skip: 5
+  boat_length: 1.0
+  boat_width: 0.5
