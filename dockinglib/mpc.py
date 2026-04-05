@@ -32,34 +32,68 @@ class MPCController:
         dy = state.surge * np.sin(state.psi) + state.sway * np.cos(state.psi)
         dpsi = state.yaw_rate
 
-        return OtterState(dx, dy, dpsi, du, dv, dr)
+        return OtterState(dx, dy, dpsi, du, dv, dr, state.point_idx_achieved)
     
     def _u_only_objective(self, u_flattened, state:OtterState, maneuver):
         u_traj = u_flattened.reshape((self.config.lookahead_steps, 2))
         temp_state = state.copy()
         total_cost = 0
-        
         dt = self.config.dt
-        
+
         for i in range(self.config.lookahead_steps):
+            # 1. Physics Step
             k1 = self._otter_model(temp_state, u_traj[i])
             temp_state_mid = temp_state + k1 * 0.5 * dt
             k2 = self._otter_model(temp_state_mid, u_traj[i])
             temp_state = temp_state + k2 * dt 
 
-            # Heavy penalty on Cross-Track Error (Y deviation)
-            total_cost += 500.0 * np.sqrt((temp_state.y - maneuver[i].y)**2 + (temp_state.x - maneuver[i].x)**2)
-
-            # Penalty on Heading relative to the path
-            psi_err = (temp_state.psi - maneuver[i].psi + np.pi) % (2 * np.pi) - np.pi
-            total_cost += 50.0 * (psi_err**2)
-
-            # Penalty on high angular velocity to prevent spinning
-            total_cost += 10.0 * (temp_state.yaw_rate)**2
-
-            # Control effort
-            total_cost += 0.01 * np.sum(u_traj[i]**2)
+            # 2. Progress Check
+            next_idx = temp_state.point_idx_achieved + 1
+            if next_idx >= maneuver.size:
+                break
+                
+            target_wp = maneuver[next_idx]
+            dist_to_next = np.hypot(temp_state.x - target_wp.x, temp_state.y - target_wp.y)
             
+            if dist_to_next <= 1.5: # Tightened tolerance
+                temp_state.point_idx_achieved += 1
+                if temp_state.point_idx_achieved + 1 >= maneuver.size:
+                    break
+                target_wp = maneuver[temp_state.point_idx_achieved + 1]
+
+            # 3. Position Cost
+            if temp_state.point_idx_achieved == -1:
+                # DRIVE TO START: Target heading is the angle TOWARD the point
+                error_pos = dist_to_next
+                target_psi = np.arctan2(target_wp.y - temp_state.y, target_wp.x - temp_state.x)
+            else:
+                # FOLLOW PATH: Use CTE and Progress
+                p1 = maneuver[temp_state.point_idx_achieved]
+                p2 = target_wp
+                dx, dy = p2.x - p1.x, p2.y - p1.y
+                line_len_sq = dx**2 + dy**2 + 1e-6
+                
+                # Cross Track Error
+                cte = np.abs(dx * (p1.y - temp_state.y) - (p1.x - temp_state.x) * dy) / np.sqrt(line_len_sq)
+                # Along Track Progress (t=0 at p1, t=1 at p2)
+                t = ((temp_state.x - p1.x) * dx + (temp_state.y - p1.y) * dy) / line_len_sq
+                
+                error_pos = (cte * 2.0) + (1.0 - t) * 5.0 # Combined positional error
+                target_psi = target_wp.psi 
+
+            # 4. Heading Error (Normalized)
+            psi_err = (temp_state.psi - target_psi + np.pi) % (2 * np.pi) - np.pi
+            
+            # 5. Total Weighted Cost
+            total_cost += 1000.0 * (error_pos**2)        # Stay on/near path
+            total_cost += 400.0  * (psi_err**2)          # Face the right way
+            total_cost += 50.0   * (temp_state.yaw_rate**2) # Don't spin like a top
+            
+            # Velocity Damping: Penalize speed if we are pointed the wrong way
+            # This prevents overshooting point [0]
+            if abs(psi_err) > 0.5:
+                total_cost += 100.0 * (temp_state.surge**2) # Brake if not facing target
+
         return total_cost
         
         
@@ -77,7 +111,19 @@ class MPCController:
         # penalize phases differently 
         # For delta: Deadband as you get far away or Median vs achievement bubble to penalize 
         
-        new_maneuver = self.mgen.get_docking_maneuver(Pose(state.x, state.y, state.psi), dock_point, path_params)
+        new_maneuver = self.mgen.generate_maneuver(dock_point, state.point_idx_achieved, path_params)
+        
+        # First, penalize the distance between each maneuver point. 
+        for p in range(new_maneuver.size - 1):
+            total_cost += 500 * np.abs( new_maneuver[p].hypot(new_maneuver[p+1]) - 2 ) # Change this to be a desired length
+        
+        start_idx = maneuver.size - new_maneuver.size - 1
+        maneuver_slice = maneuver[start_idx:]
+
+        # 2. Pair up the elements using zip() inside a list comprehension
+        total_cost += 800.0 * np.median([
+            p.hypot(m) for p, m in zip(new_maneuver, maneuver_slice)
+        ])
         
         for i in range(self.config.lookahead_steps):
             k1 = self._otter_model(temp_state, u_traj[i])
@@ -85,13 +131,37 @@ class MPCController:
             k2 = self._otter_model(temp_state_mid, u_traj[i])
             temp_state = temp_state + k2 * dt 
             
-            # Heavy penalty on Cross-Track Error (Y deviation)
-            total_cost += 500.0 * np.sqrt((temp_state.y - new_maneuver[0].y)**2 + (temp_state.x - new_maneuver[0].x)**2)
-            # WE NEED TO TARGET DIFFERENT POINTS AS WE MOVE FORWARD
-
+            if temp_state.point_idx_achieved + 1 >= (maneuver.size - 1):
+                break
+            
+            # See if we reached the next point
+            dist = np.hypot(temp_state.x - new_maneuver[temp_state.point_idx_achieved + 1].x, temp_state.y - new_maneuver[temp_state.point_idx_achieved + 1].y)
+            if dist <= 2.5: 
+                temp_state.point_idx_achieved += 1
+                
+                if temp_state.point_idx_achieved + 1 >= (maneuver.size - 1):
+                    break
+            
+            # --- NEW: Handle the -1 starting case ---
+            if temp_state.point_idx_achieved == -1:
+                # We don't have a line segment yet. 
+                # Use direct distance to waypoint 0 so the boat drives straight to the start.
+                p_target = new_maneuver[0]
+                cte = np.hypot(temp_state.x - p_target.x, temp_state.y - p_target.y)
+            else:
+                # ACTUAL Cross-Track Error (Distance to the line segment)
+                p1 = new_maneuver[temp_state.point_idx_achieved]
+                p2 = new_maneuver[temp_state.point_idx_achieved + 1]
+                
+                num = np.abs((p2.x - p1.x) * (p1.y - temp_state.y) - (p1.x - temp_state.x) * (p2.y - p1.y))
+                den = np.hypot(p2.x - p1.x, p2.y - p1.y) + 1e-6 # 1e-6 prevents division by zero
+                cte = num / den
+            
+            total_cost += 500.0 * cte # Heavy penalty for driving off the path line
+            
             # Penalty on Heading relative to the path
-            psi_err = (temp_state.psi - new_maneuver[0].psi + np.pi) % (2 * np.pi) - np.pi
-            total_cost += 50.0 * (psi_err**2)
+            psi_err = (temp_state.psi - new_maneuver[temp_state.point_idx_achieved + 1].psi + np.pi) % (2 * np.pi) - np.pi
+            total_cost += 200.0 * (psi_err**2)
 
             # Penalty on high angular velocity to prevent spinning
             total_cost += 10.0 * (temp_state.yaw_rate)**2
@@ -114,7 +184,7 @@ class MPCController:
     def solve(self, state: OtterState, dock_point:Pose, maneuver):
         guess = np.append(self.path_params_guess, self.u_guess_flattened)
 
-        path_bounds = [(1.0, 20.0), (1.0, 20.0), (0.1, 2.0), (0.1, 2.0)]  # l_a, l_b, c_a, c_b
+        path_bounds = [(5.0, 40.0), (np.pi / 4, np.pi), (5.0, 40.0),  (np.pi / 4, np.pi)]  # l_a, l_b, c_a, c_b
         control_bounds = [(-100, 100)] * (self.config.lookahead_steps * 2)
         bounds = path_bounds + control_bounds
         optimum = minimize(self._objective, guess, args=(state, maneuver, dock_point), method='SLSQP', bounds=bounds)
@@ -129,10 +199,10 @@ class MPCController:
             self.path_params_guess = best_path_params
             
         else: # Default output, this should (hopefully) never happen
-            best_path_params = [10, 10, 1, 1]
+            best_path_params = [10, 180, 10, 180]
             best_u = [0, 0]
             
-        best_maneuver =  self.mgen.get_docking_maneuver(Pose(state.x, state.y, state.psi), dock_point, best_path_params)
+        best_maneuver =  self.mgen.generate_maneuver(dock_point, state.point_idx_achieved, best_path_params)
             
         return best_u, best_maneuver
 

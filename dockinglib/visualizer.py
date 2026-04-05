@@ -26,6 +26,13 @@ class Visualizer:
         self.frame_count = 0
         self.trajectory_history = []  
         
+        # --- NEW: Initialize text containers ---
+        self.waypoint_texts = []  # Holds the text objects for waypoint numbers
+        # Create a text box pinned to the top-left of the axes
+        self.status_text = self.ax.text(0.02, 0.98, '', transform=self.ax.transAxes, 
+                                        verticalalignment='top', 
+                                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
         plt.ion()
         self.fig.canvas.draw()
         self.fig.show()
@@ -64,8 +71,25 @@ class Visualizer:
         
         self.target_marker.set_data([dock_point.x], [dock_point.y])
         
+        # --- NEW: Update the text box ---
+        self.status_text.set_text(f"point_idx_achieved: {state.point_idx_achieved}")
+        
+        # --- NEW: Update waypoint index numbers ---
+        # 1. Clear old waypoint text objects from the plot
+        for txt in self.waypoint_texts:
+            txt.remove()
+        self.waypoint_texts.clear()
+        
         if len(maneuver) > 0:
-            self.waypoint_marker.set_data([maneuver[0].x], [maneuver[0].y])
+            # 2. Draw new text objects for each waypoint
+            for i, p in enumerate(maneuver):
+                # Adding a small offset (+0.3) so the number doesn't sit exactly on the line
+                txt = self.ax.text(p.x + 0.3, p.y + 0.3, str(i), fontsize=9, color='darkred')
+                self.waypoint_texts.append(txt)
+            
+            # Safe-guard target waypoint logic
+            next_wp_idx = min(state.point_idx_achieved + 1, len(maneuver) - 1)
+            self.waypoint_marker.set_data([maneuver[next_wp_idx].x], [maneuver[next_wp_idx].y])
 
         self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events()

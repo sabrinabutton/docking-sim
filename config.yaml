@@ -28,16 +28,16 @@ simulation:
     surge: 0.0
     sway: 0.0
     yaw_rate: 0.0
+    point_idx_achieved: -1
   dock_pose: 
-    x: 1.0
-    y: 1.0
+    x: 10.0
+    y: 10.0
     psi: 0.0
-    p_type: START
   disturbance_amplitude_x: 0.2
   disturbance_amplitude_y: -0.3
-  waypoint_tolerance: 0.2
+  waypoint_tolerance: 2.0
 
 visualizer:
-  timestep_skip: 5
+  timestep_skip: 1
   boat_length: 1.0
   boat_width: 0.5

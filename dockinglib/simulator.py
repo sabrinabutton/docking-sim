@@ -32,9 +32,9 @@ class Simulator:
         dy = self.state.surge*np.sin(self.state.psi) + self.state.sway*np.cos(self.state.psi) + Vcy
         dpsi = self.state.yaw_rate
 
-        return OtterState(dx, dy, dpsi, du, dv, dr)
+        return OtterState(dx, dy, dpsi, du, dv, dr, self.state.point_idx_achieved)
     
-    def step(self, u):
+    def step(self, u, maneuver):
         self.time += self.config.integration_step
         # Use 2nd-order integrator (RK2) for better accuracy
         dt = self.config.integration_step
@@ -44,3 +44,8 @@ class Simulator:
         self.state = temp_state
         k2 = self._get_derivatives(u)
         self.state = old_state + k2 * dt
+        
+        dist = np.hypot(self.state.x - maneuver[self.state.point_idx_achieved + 1].x, self.state.y - maneuver[self.state.point_idx_achieved + 1].y)
+        if dist <= self.config.waypoint_tolerance: # TODO: Replace with waypoint tolerance config
+            self.state.point_idx_achieved += 1
+            

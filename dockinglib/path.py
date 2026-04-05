@@ -1,8 +1,8 @@
 import numpy as np
 from .data import Pose
 
-APPROACH_LENGTH = 5
-BERTH_LENGTH = 5
+APPROACH_LENGTH = 20
+BERTH_LENGTH = 20
 TOTAL_LENGTH = APPROACH_LENGTH + BERTH_LENGTH
 
 # Param order
@@ -16,7 +16,7 @@ class ManeuverGenerator:
     def __init__(self, config):
         self.config = config.maneuver_generator
     
-    def _get_arc(end, r, theta, pts):
+    def _get_arc(self, end, r, theta, pts):
         if pts <= 0:
             return []
 
@@ -40,24 +40,20 @@ class ManeuverGenerator:
             for a in angles
         ])
     
-    def generate_maneuver(self, dock_point, point_idx_achieved, r_approach, theta_approach, r_berth, theta_berth):
+    def _generate_maneuver(self, dock_point, point_idx_achieved, r_approach, theta_approach, r_berth, theta_berth):
         pts_approach = max(0, (APPROACH_LENGTH - 1) - point_idx_achieved)
         pts_berth = max(0, min(BERTH_LENGTH, TOTAL_LENGTH - 1 - point_idx_achieved))
         
-        berth = self._get_arc(dock_point, r_berth, theta_berth, pts_berth)
+        berth = self._get_arc(dock_point, r_berth, -theta_berth * np.copysign(1.0, r_berth), pts_berth)
         
         if(berth.size == 0):
             print("Failure. Berth couldn't generate a path.")
         
-        approach = self._get_arc(berth[0], r_approach, theta_approach, pts_approach)
-        
-        return approach + berth
+        approach = self._get_arc(berth[0], r_approach, theta_approach * np.copysign(1.0, r_approach), pts_approach)
+    
+        return np.append(approach, berth)
     
     def generate_maneuver(self, dock_point, point_idx_achieved, params):
         # Assume params are in order
-        return self.generate_maneuver(dock_point, point_idx_achieved, 
+        return self._generate_maneuver(dock_point, point_idx_achieved, 
                                       params[R_APPROACH_IDX], params[THETA_APPROACH_IDX], params[R_BERTH_IDX], params[THETA_BERTH_IDX])
-    
-    
-        
-    
