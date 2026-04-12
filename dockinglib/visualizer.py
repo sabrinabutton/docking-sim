@@ -1,95 +1,107 @@
+"""
+    vizualizer.py
+    --------------
+    Creates an animation of an ASV following the planned trajectory while tracing its actual trajectory.
+"""
+
 import numpy as np
 import matplotlib.pyplot as plt
 
+from .data import Position
+from .model import R
+from .config import ModelConfig
+
 class Visualizer:
     
-    def __init__(self, config):
-        self.config = config.viz
-        self.fig, self.ax = plt.subplots()
-        self.ax.set_xlim(-20, 20)
-        self.ax.set_ylim(-20, 20)
+    def __init__(self, modelconf:ModelConfig, methods=['vanilla']):
+        self.modelconf = modelconf
+        self.fig, self.ax = plt.subplots(figsize=(10, 8))
+        self.ax.set_xlim(-10, 40)
+        self.ax.set_ylim(-10, 40)
         self.ax.set_aspect('equal')
         
-        self.boat_polygon, = self.ax.plot([], [], 'b-', linewidth=2) # The boat hull
-        self.path_line, = self.ax.plot([], [], 'r--', alpha=0.5)   # The planned path
-        self.trajectory_line, = self.ax.plot([], [], 'grey', linewidth=1)  # Actual trajectory
-        self.target_marker, = self.ax.plot([], [], 'go', markersize=8) # The dock
-        self.waypoint_marker, = self.ax.plot([], [], 'ko', markersize=4)  # Current target waypoint
+        self.methods = methods
+        
+        # Color Palettes for Comparison
+        self.colors = {
+            'vanilla': {'boat': 'r', 'actual': 'darkred', 'planned': 'lightcoral'},
+            'multi-rate': {'boat': 'b', 'actual': 'darkblue', 'planned': 'cornflowerblue'},
+            'single-shoot': {'boat': 'g', 'actual': 'darkgreen', 'planned': 'lightgreen'}
+        }
+        
+        self.plots = {}
+        self.trajectory_history = {m: [] for m in methods}
+        
+        legend_handles = []
+        legend_labels = []
+        
+        # Initialize plot elements for each method
+        for m in methods:
+            c = self.colors.get(m, {'boat': 'k', 'actual': 'k', 'planned': 'gray'})
+            
+            boat_poly, = self.ax.plot([], [], color=c['boat'], linestyle='-', linewidth=2)
+            actual_traj, = self.ax.plot([], [], color=c['actual'], linestyle='-', linewidth=1.5, alpha=0.8)
+            planned_traj, = self.ax.plot([], [], color=c['planned'], linestyle='--', linewidth=1.5, alpha=0.6)
+            
+            self.plots[m] = {
+                'boat': boat_poly,
+                'actual': actual_traj,
+                'planned': planned_traj
+            }
+            
+            legend_handles.extend([boat_poly, planned_traj, actual_traj])
+            legend_labels.extend([f'{m} (Boat)', f'{m} (Planned)', f'{m} (Actual)'])
+
+        self.target_marker, = self.ax.plot([], [], 'go', markersize=8)
+        legend_handles.append(self.target_marker)
+        legend_labels.append('Target Dock')
         
         self.ax.set_xlabel("X (m)")
         self.ax.set_ylabel("Y (m)")
-        self.ax.set_title("Autonomous Docking Simulation")
+        self.ax.set_title("SPaC Architecture Comparison")
         self.ax.grid(True, alpha=0.3)
-        self.ax.legend([self.boat_polygon, self.path_line, self.trajectory_line, self.target_marker, self.waypoint_marker],
-                       ['Boat', 'Planned Path', 'Actual Trajectory', 'Dock', 'Target Waypoint'], loc='upper right')
+        self.ax.legend(legend_handles, legend_labels, loc='upper right', fontsize='small')
         
-        self.frame_count = 0
-        self.trajectory_history = []  
+    def _get_boat_shape(self, eta: Position):
+        l = self.modelconf.length / 2
+        w = self.modelconf.width / 2
         
-        # --- NEW: Initialize text containers ---
-        self.waypoint_texts = []  # Holds the text objects for waypoint numbers
-        # Create a text box pinned to the top-left of the axes
-        self.status_text = self.ax.text(0.02, 0.98, '', transform=self.ax.transAxes, 
-                                        verticalalignment='top', 
-                                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        
-        plt.ion()
-        self.fig.canvas.draw()
-        self.fig.show()
-        
-    def _get_boat_shape(self, state):
         pts = np.array([
-            [self.config.boat_length/2, 0], # Nose
-            [-self.config.boat_length/2, self.config.boat_width/2], # Back Left
-            [-self.config.boat_length/2, -self.config.boat_width/2], # Back Right
-            [self.config.boat_length/2, 0] # Nose
+            [l, 0], # Nose
+            [-l, w], # Back Left
+            [-l, -w], # Back Right
+            [l, 0] # Nose
         ])
         
-        c, s = np.cos(state.psi), np.sin(state.psi)
-        R = np.array([[c, -s], [s, c]])
-        
-        pts_global = (R @ pts.T).T + np.array([state.x, state.y])
-        
+        pts_global = (R(eta[2])[0:2, 0:2] @ pts.T).T + np.array([eta[0], eta[1]])
         return pts_global[:, 0], pts_global[:, 1]
         
-    def update(self, state, maneuver, dock_point):
-        # Record actual trajectory
-        self.trajectory_history.append((state.x, state.y))
-        
-        if len(self.trajectory_history) > 1:
-            traj_x = [p[0] for p in self.trajectory_history]
-            traj_y = [p[1] for p in self.trajectory_history]
-            self.trajectory_line.set_data(traj_x, traj_y)
-        
-        path_x = [p.x for p in maneuver]
-        path_y = [p.y for p in maneuver]
-        self.path_line.set_data(path_x, path_y)
-
-        # Update boat position and orientation
-        boat_shape = self._get_boat_shape(state)
-        self.boat_polygon.set_data(boat_shape[0], boat_shape[1])
-        
-        self.target_marker.set_data([dock_point.x], [dock_point.y])
-        
-        # --- NEW: Update the text box ---
-        self.status_text.set_text(f"point_idx_achieved: {state.point_idx_achieved}")
-        
-        # --- NEW: Update waypoint index numbers ---
-        # 1. Clear old waypoint text objects from the plot
-        for txt in self.waypoint_texts:
-            txt.remove()
-        self.waypoint_texts.clear()
-        
-        if len(maneuver) > 0:
-            # 2. Draw new text objects for each waypoint
-            for i, p in enumerate(maneuver):
-                # Adding a small offset (+0.3) so the number doesn't sit exactly on the line
-                txt = self.ax.text(p.x + 0.3, p.y + 0.3, str(i), fontsize=9, color='darkred')
-                self.waypoint_texts.append(txt)
+    def update(self, state_dict):
+        """
+        Expects state_dict format: {'vanilla': (eta, v, maneuver), 'multi-rate': (eta, v, maneuver)}
+        """
+        for m, state in state_dict.items():
+            if state is None:
+                continue
+                
+            eta, v, maneuver = state
             
-            # Safe-guard target waypoint logic
-            next_wp_idx = min(state.point_idx_achieved + 1, len(maneuver) - 1)
-            self.waypoint_marker.set_data([maneuver[next_wp_idx].x], [maneuver[next_wp_idx].y])
+            self.trajectory_history[m].append((eta[0], eta[1]))
+            
+            if len(self.trajectory_history[m]) > 1:
+                traj_x = [p[0] for p in self.trajectory_history[m]]
+                traj_y = [p[1] for p in self.trajectory_history[m]]
+                self.plots[m]['actual'].set_data(traj_x, traj_y)
+            
+            path_x = [p.eta[0] for p in maneuver]
+            path_y = [p.eta[1] for p in maneuver]
+            self.plots[m]['planned'].set_data(path_x, path_y)
 
+            boat_shape = self._get_boat_shape(eta)
+            self.plots[m]['boat'].set_data(boat_shape[0], boat_shape[1])
+            
+            if len(maneuver) > 0:
+                self.target_marker.set_data([maneuver[-1].eta[0]], [maneuver[-1].eta[1]])
+        
         self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events()

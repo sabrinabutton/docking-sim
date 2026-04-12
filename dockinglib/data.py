@@ -1,37 +1,33 @@
-from dataclasses import dataclass
-from enum import Enum, IntEnum
+"""
+    data.py
+    -------
+    Holds Position, Velocity, and TrajectoryPoint clases.
+    Position and Velocity are defined simply for type safety; they are just 1x3 numpy vectors.
+
+"""
 import numpy as np
+
+class Position(np.ndarray):
+    """A 3-element numpy array representing [x, y, psi] with property accessors."""
     
-@dataclass
-class Pose:
-    x: float
-    y: float
-    psi: float
+    def __new__(cls, input_array):
+        obj = np.asarray(input_array, dtype=float).view(cls)
+        if obj.shape != (3,):
+            raise ValueError("Position must be a 3-element array.")
+        return obj
+
+class Velocity(np.ndarray):
+    """A 3-element numpy array representing [u, v, r] with property accessors."""
     
-    def hypot(self, point: Pose):
-        return np.hypot(self.x - point.x, self.y - point.y) 
-    
-@dataclass
-class OtterState:
-    x: float
-    y: float
-    psi: float
-    surge: float
-    sway: float
-    yaw_rate: float
-    point_idx_achieved: int
-    
-    def copy(self):
-        return OtterState(self.x, self.y, self.psi,
-                          self.surge, self.sway, self.yaw_rate,
-                          self.point_idx_achieved)
-    
-    def __add__(self, other):
-        return OtterState(self.x + other.x, self.y + other.y, self.psi + other.psi,
-                          self.surge + other.surge, self.sway + other.sway, self.yaw_rate + other.yaw_rate,
-                          self.point_idx_achieved)
+    def __new__(cls, input_array):
+        obj = np.asarray(input_array, dtype=float).view(cls)
+        if obj.shape != (3,):
+            raise ValueError("Velocity must be a 3-element array.")
+        return obj
         
-    def __mul__(self, scalar):
-        return OtterState(self.x * scalar, self.y * scalar, self.psi * scalar,
-                          self.surge * scalar, self.sway * scalar, self.yaw_rate * scalar,
-                          self.point_idx_achieved)
+class TrajectoryPoint:
+    """A point on a docking trajectory containing a position and velocity."""
+    def __init__(self, eta: Position, v: Velocity):
+        self.eta = eta
+        self.v = v
+    
