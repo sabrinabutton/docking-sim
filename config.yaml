@@ -1,43 +1,48 @@
-# Editing this config file will change algo behaviour/simulation
 maneuver_generator: 
-  interpolation_count: 10
-  max_curvature: 0.6 # TODO: need to add these bounds to solver
-  min_arc_length: 3.0
-
-mpc:
-  lookahead_steps: 12
-  dt: 0.1
-  max_solver_iterations: 150
-  
-weights:
-  maneuver_length: 50.0 #TODO: Implement
-  curvature_violation: 50.0 #TODO: Implement
-  cross_track: 600.0
-  heading: 45.0
-  angular_velocity: 12.0
-  control_effort: 0.05
+  capture_radius: 2.0
 
 simulation:
-  total_timesteps: 500
-  integration_step: 0.1
-  enable_noise: true
-  start_state: 
-    x: 0.0
-    y: 0.0
-    psi: 0.0
-    surge: 0.0
-    sway: 0.0
-    yaw_rate: 0.0
-  dock_pose: 
-    x: 1.0
-    y: 1.0
-    psi: 0.0
-    p_type: START
-  disturbance_amplitude_x: 0.2
-  disturbance_amplitude_y: -0.3
-  waypoint_tolerance: 0.2
+  initial_maneuver_params: [-10.0, 1.57079632679, 10.0, 1.57079632679]
+  initial_position: [30.0, 20.0, 2.141592653589]
+  target_dock: [10.0, 20.0, 0.0]
+  max_steps: 500
+  multirate_replanning_interval: 10
+  dt: 0.1
 
-visualizer:
-  timestep_skip: 5
-  boat_length: 1.0
-  boat_width: 0.5
+model:
+  mass: 55.0
+  length: 2.0
+  width: 1.0
+  surge_period: 3.0
+  yaw_period: 1.0 
+  cg_to_pontoon: 0.395
+  thrust_coeff: 60.0
+
+disturbances:
+  preset: "none" # options: none, semilinear_winds, heavy_storm
+  active: false
+  magnitude: 0.5
+  base_dir: 0.0
+  sweep_angle: 0.0
+  freq: 0.1
+  yaw_mag: 0.1
+
+mpc:
+  horizon: 20
+  dt: 0.1
+  max_multirate_iterations: 3
+  max_singleshot_iterations: 5
+  
+weights:
+  Q_eta_pos: 157.07815887046533
+  Q_eta_psi: 13.656676926407044
+  Q_v_surge: 139.0545832458633
+  Q_v_sway: 343.42428999358344
+  Q_v_yaw: 5.730405723128058
+  Q_u: 2.200200563217731
+  W_length: 70.19417981578745
+  W_p_diff_R: 58.76124475188125
+  W_p_diff_Theta: 201.8936952337389
+  W_collapse: 143.27430489983783
+
+

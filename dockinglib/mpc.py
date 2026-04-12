@@ -1,139 +1,332 @@
+"""
+    mpc.py
+    ------
+    Holds MPC class
+"""
+
+import cvxpy as cp
 import numpy as np
 from scipy.optimize import minimize
-from .path import ManeuverGenerator
-from .data import OtterState, Pose, PointType, Status
 
-NUM_PATH_PARAMS = 4 # Constant and baked in, just made into a constant for readability
+from .mgen import ManeuverGenerator
+from .data import TrajectoryPoint, Position, Velocity
+from .model import OtterModel, R
+from .config import SystemConfig
 
-class MPCController: 
-    
-    def __init__(self, config):
+class SPaCSolver:
+
+    def __init__(self, config: SystemConfig, model: OtterModel):
+
         self.config = config.mpc
-        self.mgen = ManeuverGenerator(config); 
-        
-        self.u_guess_flattened = np.ones(self.config.lookahead_steps * 2) * 10.0
-        self.path_params_guess = np.zeros(4)
-        
-        self.m_u, self.m_v, self.I_z = 60.0, 110.0, 18.0
-        self.d_u, self.d_v, self.d_r = 50.0, 180.0, 40.0
-        self.B = 0.85
-    
-    def _otter_model(self, state: OtterState, u, Vcx=0, Vcy=0):
-        tr, tl = u
-        
-        thrust_surge = tl + tr
-        thrust_yaw = 0.5 * self.B * (tr - tl)
-        
-        du = (1.0 / self.m_u) * (thrust_surge - self.d_u * state.surge + self.m_v * state.sway * state.yaw_rate)
-        dv = (1.0 / self.m_v) * (-self.d_v * state.sway - self.m_u * state.surge * state.yaw_rate)
-        dr = (1.0 / self.I_z) * (thrust_yaw - self.d_r * state.yaw_rate)
+        self.model = model 
 
-        dx = state.surge * np.cos(state.psi) - state.sway * np.sin(state.psi)
-        dy = state.surge * np.sin(state.psi) + state.sway * np.cos(state.psi)
-        dpsi = state.yaw_rate
+        weights = config.weights
+        self.Q_eta = np.diag([weights.Q_eta_pos, weights.Q_eta_pos, weights.Q_eta_psi])
+        self.Q_v = np.diag([weights.Q_v_surge, weights.Q_v_sway, weights.Q_v_yaw])
+        self.Q_u = np.diag([weights.Q_u, weights.Q_u])
+        
+        self.W_length = weights.W_length
+        self.W_p_diff = np.array([weights.W_p_diff_R, weights.W_p_diff_Theta, weights.W_p_diff_R, weights.W_p_diff_Theta])
+        self.W_collapse = weights.W_collapse
 
-        return OtterState(dx, dy, dpsi, du, dv, dr)
-    
-    def _u_only_objective(self, u_flattened, state:OtterState, maneuver):
-        u_traj = u_flattened.reshape((self.config.lookahead_steps, 2))
-        temp_state = state.copy()
-        total_cost = 0
-        
-        dt = self.config.dt
-        
-        for i in range(self.config.lookahead_steps):
-            k1 = self._otter_model(temp_state, u_traj[i])
-            temp_state_mid = temp_state + k1 * 0.5 * dt
-            k2 = self._otter_model(temp_state_mid, u_traj[i])
-            temp_state = temp_state + k2 * dt 
+        self.mgen = ManeuverGenerator(config.maneuver_generator)
 
-            # Heavy penalty on Cross-Track Error (Y deviation)
-            total_cost += 500.0 * np.sqrt((temp_state.y - maneuver[i].y)**2 + (temp_state.x - maneuver[i].x)**2)
+    # -------------------------------------------------------------------------
+    # Helper Methods
+    # -------------------------------------------------------------------------
 
-            # Penalty on Heading relative to the path
-            psi_err = (temp_state.psi - maneuver[i].psi + np.pi) % (2 * np.pi) - np.pi
-            total_cost += 50.0 * (psi_err**2)
+    def _normalize_inputs(self, eta, v, u):
+        """Cast and flatten eta, v, u to guaranteed 1D float arrays."""
+        return (
+            np.asarray(eta, dtype=float).flatten(),
+            np.asarray(v, dtype=float).flatten(),
+            np.asarray(u, dtype=float).flatten(),
+        )
 
-            # Penalty on high angular velocity to prevent spinning
-            total_cost += 10.0 * (temp_state.yaw_rate)**2
+    def _pad_trajectory(self, trajectory, eta_val):
+        """
+        Ensure trajectory is exactly self.config.horizon steps long.
+        If empty, fills with a zero-velocity hold at the current pose.
+        If shorter than the horizon, pads by repeating the last item.
+        """
+        if len(trajectory) == 0:
+            hold = TrajectoryPoint(Position(eta_val), Velocity([0.0, 0.0, 0.0]))
+            return [hold] * self.config.horizon
+        if len(trajectory) < self.config.horizon:
+            return list(trajectory) + [trajectory[-1]] * (self.config.horizon - len(trajectory))
+        return trajectory
 
-            # Control effort
-            total_cost += 0.01 * np.sum(u_traj[i]**2)
-            
-        return total_cost
-        
-        
-    # TODO: PROBLEM: It cannot actually solve this!
-    def _objective(self, path_u_flattened, state:OtterState, maneuver, dock_point, status):
-        path_params, u_flattened = path_u_flattened[:(NUM_PATH_PARAMS )], path_u_flattened[(NUM_PATH_PARAMS):]
-        u_traj = u_flattened.reshape((self.config.lookahead_steps, 2))
-        
-        temp_state = state.copy()
-        total_cost = 0
-        
-        dt = self.config.dt
-        
-        # Length, similarity/delta, end position, terminal point
-        # penalize phases differently 
-        # For delta: Deadband as you get far away or Median vs achievement bubble to penalize 
-        
-        new_maneuver = self.mgen.get_docking_maneuver(Pose(state.x, state.y, state.psi, PointType.SETUP), dock_point, path_params, status)
-        
-        for i in range(self.config.lookahead_steps):
-            k1 = self._otter_model(temp_state, u_traj[i])
-            temp_state_mid = temp_state + k1 * 0.5 * dt
-            k2 = self._otter_model(temp_state_mid, u_traj[i])
-            temp_state = temp_state + k2 * dt 
-            
-            # Heavy penalty on Cross-Track Error (Y deviation)
-            total_cost += 500.0 * np.sqrt((temp_state.y - new_maneuver[0].y)**2 + (temp_state.x - new_maneuver[0].x)**2)
-            # WE NEED TO TARGET DIFFERENT POINTS AS WE MOVE FORWARD
+    def _wrap_target_heading(self, t_eta, ref_heading):
+        """
+        Return a copy of t_eta with its heading component wrapped relative
+        to ref_heading, so the angular error stays in (-pi, pi].
+        """
+        t = t_eta.copy()
+        t[2] = ref_heading + ((t[2] - ref_heading + np.pi) % (2 * np.pi) - np.pi)
+        return t
 
-            # Penalty on Heading relative to the path
-            psi_err = (temp_state.psi - new_maneuver[0].psi + np.pi) % (2 * np.pi) - np.pi
-            total_cost += 50.0 * (psi_err**2)
+    def _build_linearized_system(self, eta_val, v_val, u_val):
+        """
+        Linearise the 6-DOF (eta, v) dynamics around the current operating
+        point and discretise with a forward-Euler step of self.config.dt.
 
-            # Penalty on high angular velocity to prevent spinning
-            total_cost += 10.0 * (temp_state.yaw_rate)**2
+        Returns
+        -------
+        A_6d, B_6d : discrete-time state and input matrices (6x6, 6x2)
+        x_dot_0    : continuous-time state derivative at the operating point
+        """
+        u_0, v_sw0, _ = v_val
+        psi_0 = eta_val[2]
 
-            # Control effort
-            total_cost += 0.01 * np.sum(u_traj[i]**2)
-            
-        return total_cost
-    
-    def solve_with_fixed_maneuver(self, state: OtterState, maneuver):
-        bounds = [(-100, 100)] * (self.config.lookahead_steps * 2)
-        optimum = minimize(self._u_only_objective, self.u_guess_flattened, args=(state, maneuver), method='SLSQP', bounds=bounds)
-        
-        if optimum.success: # If we achieve convergence to a local minima
-            self.u_guess_flattened = np.roll(optimum.x, -2) # Warm start
-            return optimum.x.reshape((-1, 2))[0]
-        else:
+        v_dot_0 = self.model.dynamics(v_val, u_val)
+        A_cont, B_cont = self.model.get_linearized_dynamics(v_val)
+
+        # Jacobian of the kinematic map J(eta) w.r.t. eta, evaluated at psi_0
+        J_K = np.zeros((3, 3))
+        J_K[0, 2] = -u_0 * np.sin(psi_0) - v_sw0 * np.cos(psi_0)
+        J_K[1, 2] =  u_0 * np.cos(psi_0) - v_sw0 * np.sin(psi_0)
+
+        R_0 = R(psi_0)
+
+        # Continuous 6x6 system
+        A_6 = np.zeros((6, 6))
+        A_6[0:3, 0:3] = J_K
+        A_6[0:3, 3:6] = R_0
+        A_6[3:6, 3:6] = A_cont
+
+        B_6 = np.zeros((6, 2))
+        B_6[3:6, :] = B_cont
+
+        # Forward-Euler discretisation
+        A_6d = np.eye(6) + A_6 * self.config.dt
+        B_6d = B_6 * self.config.dt
+
+        eta_dot_0 = R_0 @ v_val
+        x_dot_0 = np.concatenate([eta_dot_0, v_dot_0])
+
+        return A_6d, B_6d, x_dot_0
+
+    def _disturbance_vector(self, d_hat):
+        """Embed a 3-DOF body-frame disturbance into the 6-DOF state vector."""
+        d_6 = np.zeros(6)
+        d_6[3:6] = d_hat
+        return d_6
+
+    def _build_qp(self, eta_val, v_val, u_val, padded_traj,
+                  A_6d, B_6d, x_dot_0, d_6):
+        """
+        Construct the CVXPY QP variables, cost, and constraints for one
+        MPC horizon.
+
+        Returns
+        -------
+        problem : cp.Problem  (not yet solved)
+        du      : cp.Variable (2 x horizon) — incremental thrust decisions
+        """
+        dx = cp.Variable((6, self.config.horizon + 1))
+        du = cp.Variable((2, self.config.horizon))
+
+        cost = 0.0
+        constraints = [dx[:, 0] == np.zeros(6)]
+
+        for k in range(self.config.horizon):
+            t_eta_k = self._wrap_target_heading(
+                np.asarray(padded_traj[k].eta, dtype=float).flatten(),
+                eta_val[2],
+            )
+            t_v_k = np.asarray(padded_traj[k].v, dtype=float).flatten()
+
+            constraints += [
+                dx[:, k + 1] == A_6d @ dx[:, k] + B_6d @ du[:, k] + (x_dot_0 + d_6) * self.config.dt
+            ]
+
+            eta_pred = eta_val + dx[0:3, k + 1]
+            v_pred   = v_val   + dx[3:6, k + 1]
+
+            eta_error = t_eta_k - eta_pred
+            v_error   = t_v_k   - v_pred
+
+            cost += cp.quad_form(eta_error, self.Q_eta)
+            cost += cp.quad_form(v_error,   self.Q_v)
+
+            # Halve the actuation penalty when the reference requests reverse
+            Q_u_k = self.Q_u * (0.5 if t_v_k[0] < 0 else 1.0)
+            cost += cp.quad_form(du[:, k], Q_u_k)
+
+            # Hard state constraints
+            constraints += [v_pred[0] >= -2.0, v_pred[0] <= 3.0]   # surge
+            constraints += [v_pred[1] >= -1.0, v_pred[1] <= 1.0]   # sway
+            constraints += [v_pred[2] >= -1.5, v_pred[2] <= 1.5]   # yaw rate
+
+            abs_thrust = u_val + du[:, k]
+            constraints += [abs_thrust >= -1.0, abs_thrust <= 1.0]
+
+        return cp.Problem(cp.Minimize(cost), constraints), du
+
+    def _spac_geometric_penalty(self, p_guess, p_prev):
+        """
+        Compute the three SPaC geometric penalties:
+          1. Arc-length upper-bound  (prefer short paths)
+          2. Continuity              (prefer small jumps from p_prev)
+          3. Collapse lower-bound    (enforce minimum berth lengths)
+
+        Returns a scalar penalty value.
+        """
+        R_a, Theta_a, R_b, Theta_b = p_guess
+
+        MIN_BERTH_LEN = 15.0
+        MIN_THETA     = 0.5
+        MIN_APPROACH  = 10.0
+
+        length_cost = self.W_length * (abs(R_a) * Theta_a + abs(R_b) * Theta_b)
+        diff_cost   = np.sum(self.W_p_diff * (p_guess - p_prev) ** 2)
+
+        collapse_cost = (
+            self.W_collapse * max(0, MIN_BERTH_LEN - abs(R_b) * Theta_b) ** 2
+            + self.W_collapse * max(0, MIN_THETA     - Theta_b) ** 2
+            + self.W_collapse * max(0, MIN_APPROACH  - abs(R_a) * Theta_a) ** 2
+        )
+
+        return length_cost + diff_cost + collapse_cost
+
+    def _generate_padded_trajectory(self, eta_val, dock_point, p_guess, dt,
+                                    cruise_speed, reverse_speed):
+        """Generate a maneuver and pad it to self.config.horizon steps."""
+        trajectory = self.mgen.generate_maneuver(
+            current_eta=eta_val,
+            dock_point=dock_point,
+            params=p_guess,
+            dt=dt,
+            cruise_speed=cruise_speed,
+            reverse_speed=reverse_speed,
+        )
+        return self._pad_trajectory(trajectory, eta_val)
+
+    # -------------------------------------------------------------------------
+    # Solvers
+    # -------------------------------------------------------------------------
+
+    def vanilla_solve(self, eta, v, u, trajectory, d_hat=np.zeros(3)):
+        eta_val, v_val, u_val = self._normalize_inputs(eta, v, u)
+
+        padded_traj = self._pad_trajectory(trajectory, eta_val)
+        A_6d, B_6d, x_dot_0 = self._build_linearized_system(eta_val, v_val, u_val)
+        d_6 = self._disturbance_vector(d_hat)
+
+        problem, du = self._build_qp(eta_val, v_val, u_val, padded_traj,
+                                     A_6d, B_6d, x_dot_0, d_6)
+        try:
+            problem.solve(solver=cp.OSQP)
+            if problem.status not in ("optimal", "optimal_inaccurate"):
+                return np.array([0.0, 0.0])
+            return u_val + du[:, 0].value
+        except Exception:
             return np.array([0.0, 0.0])
+
+    def spac_solve(self, eta, v, u_prev, dock_point, p_prev, dt=0.1,
+                   cruise_speed=1.0, reverse_speed=0.5, d_hat=np.zeros(3)):
+
+        eta_val, v_val, u_val = self._normalize_inputs(eta, v, u_prev)
         
-    def solve(self, state: OtterState, dock_point:Pose, maneuver, status):
-        guess = np.append(self.path_params_guess, self.u_guess_flattened)
+        A_6d, B_6d, x_dot_0 = self._build_linearized_system(eta_val, v_val, u_val)
+        d_6 = self._disturbance_vector(d_hat)
 
-        path_bounds = [(1.0, 20.0), (1.0, 20.0), (0.1, 2.0), (0.1, 2.0)]  # l_a, l_b, c_a, c_b
-        control_bounds = [(-100, 100)] * (self.config.lookahead_steps * 2)
-        bounds = path_bounds + control_bounds
-        optimum = minimize(self._objective, guess, args=(state, maneuver, dock_point, status), method='SLSQP', bounds=bounds)
+        def evaluate_p(p_guess):
+            padded_traj = self._generate_padded_trajectory(
+                eta_val, dock_point, p_guess, dt, cruise_speed, reverse_speed
+            )
+
+            problem, _ = self._build_qp(eta_val, v_val, u_val, padded_traj,
+                                         A_6d, B_6d, x_dot_0, d_6)
+            try:
+                problem.solve(solver=cp.OSQP)
+                if problem.status not in ("optimal", "optimal_inaccurate"):
+                    return 1e6
+                return problem.value + self._spac_geometric_penalty(p_guess, p_prev)
+            except Exception:
+                return 1e6
+
+        p_bounds = [(-50.0, -2.0), (0.1, np.pi), (2.0, 50.0), (0.1, np.pi)]
+        opt_result = minimize(evaluate_p, p_prev, method="SLSQP",
+                              bounds=p_bounds, options={"maxiter": self.config.max_multirate_iterations})
+        best_p = opt_result.x
+
+        final_traj = self._generate_padded_trajectory(
+            eta_val, dock_point, best_p, dt, cruise_speed, reverse_speed
+        )
+        u_opt = self.vanilla_solve(eta, v, u_prev, final_traj)
+        return u_opt, best_p
+
+    def nonlinear_spac_solver(self, eta, v, u_prev, dock_point, p_prev, dt=0.1,
+                               cruise_speed=1.0, reverse_speed=0.5, d_hat=np.zeros(3)):
+        import copy
         
-        if optimum.success: # If we achieve convergence to a local minima
-            # Seperate the path and the thruster inputs
-            best_path_params, best_u_flattened = optimum.x[:(NUM_PATH_PARAMS)], optimum.x[(NUM_PATH_PARAMS):]
-            best_u = best_u_flattened.reshape((-1, 2))[0]
-            
-            # Setup warm start
-            self.u_guess_flattened = np.roll(best_u_flattened, -2) # next timestep in array
-            self.path_params_guess = best_path_params
-            
-        else: # Default output, this should (hopefully) never happen
-            best_path_params = [10, 10, 1, 1]
-            best_u = [0, 0]
-            
-        best_maneuver =  self.mgen.get_docking_maneuver(Pose(state.x, state.y, state.psi, PointType.SETUP), dock_point, best_path_params, status)
-            
-        return best_u, best_maneuver
+        eta_start, v_start, u_prev_val = self._normalize_inputs(eta, v, u_prev)
 
+        # Decision vector: Z = [u_flat (horizon x 2), R_a, Theta_a, R_b, Theta_b]
+        Z0 = np.concatenate((np.zeros((self.config.horizon, 2)).flatten(), p_prev))
 
+        thrust_bounds = [(-1.0, 1.0)] * (self.config.horizon * 2)
+        path_bounds   = [(-50.0, -2.0), (0.1, np.pi), (2.0, 50.0), (0.1, np.pi)]
+        bounds        = thrust_bounds + path_bounds
+
+        def evaluate_nmpc(Z):
+            U       = Z[:-4].reshape((self.config.horizon, 2))
+            p_guess = Z[-4:]
+
+            padded_traj = self._generate_padded_trajectory(
+                eta_start, dock_point, p_guess, dt, cruise_speed, reverse_speed
+            )
+
+            cost    = 0.0
+            curr_eta = copy.deepcopy(eta_start)
+            curr_v   = copy.deepcopy(v_start)
+            prev_u   = u_prev_val
+
+            for k in range(self.config.horizon):
+                u_k = U[k]
+
+                # RK4 integration with disturbance
+                def dyn(v_, u_): return self.model.dynamics(v_, u_) + d_hat
+
+                k1 = dyn(curr_v, u_k)
+                k2 = dyn(curr_v + 0.5 * dt * k1, u_k)
+                k3 = dyn(curr_v + 0.5 * dt * k2, u_k)
+                k4 = dyn(curr_v + dt * k3, u_k)
+                
+                curr_v   = curr_v + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+                curr_eta = curr_eta + self.model.kinematics(curr_eta[2], curr_v) * dt
+                curr_eta[2] = (curr_eta[2] + np.pi) % (2 * np.pi) - np.pi
+
+                t_eta = self._wrap_target_heading(
+                    np.asarray(padded_traj[k].eta), curr_eta[2]
+                )
+                t_v  = np.asarray(padded_traj[k].v)
+                du   = u_k - prev_u
+
+                eta_error = t_eta - curr_eta
+                v_error   = t_v   - curr_v
+
+                cost += np.dot(eta_error, self.Q_eta @ eta_error)
+                cost += np.dot(v_error,   self.Q_v   @ v_error)
+                cost += np.dot(du,        self.Q_u   @ du)
+
+                # Soft surge constraints
+                if curr_v[0] > 3.0:  cost += 1000 * (curr_v[0] - 3.0)  ** 2
+                if curr_v[0] < -2.0: cost += 1000 * (-2.0 - curr_v[0]) ** 2
+
+                prev_u = u_k
+
+            # Geometric penalties with nonlinear_spac_solver-specific weights
+            R_a, Theta_a, R_b, Theta_b = p_guess
+            cost += self.W_length * (abs(R_a) * Theta_a + abs(R_b) * Theta_b)
+            cost += np.sum(self.W_p_diff * (p_guess - p_prev) ** 2)
+            cost += self.W_collapse * max(0, 15.0 - abs(R_b) * Theta_b) ** 2
+            cost += self.W_collapse * max(0, 0.5  - Theta_b)            ** 2
+
+            return cost
+
+        opt_result = minimize(evaluate_nmpc, Z0, method="SLSQP",
+                              bounds=bounds, options={"maxiter": self.config.max_singleshot_iterations})
+        best_Z = opt_result.x
+        return best_Z[0:2], best_Z[-4:]

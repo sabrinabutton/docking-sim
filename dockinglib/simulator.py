@@ -1,46 +1,57 @@
-import numpy as np
-from .data import OtterState
-from .config import *
+"""
+    simulator.py
+    ------------
+    Holds the system state and performs RK4 integration.
+    Owns the disturbance generator and internal time tracking.
+"""
 
-M_U, M_V, I_Z = 60.0, 110.0, 18.0
-D_U, D_V, D_R = 50.0, 180.0, 40.0
-B = 0.85
+import numpy as np
+
+from .model import OtterModel
+from .config import SystemConfig
+from .dgen import DisturbanceGenerator
 
 class Simulator:
-    
-    def __init__(self, config: SystemConfig):
-        self.config = config.simulation
+
+    def __init__(self, global_config: SystemConfig, model: OtterModel):
+        
+        self.model = model
+        self.dt = global_config.simulation.dt
+
+        self.eta = np.array(global_config.simulation.initial_position)
+        self.v = np.array([0.0, 0.0, 0.0], dtype=float)
+
+        self.disturbance = DisturbanceGenerator(global_config.disturbances)
+
         self.time = 0.0
-        self.state = self.config.start_state
-        
-    def _current(self):
-        Vcx = self.config.disturbance_amplitude_x * (1.0 + 1.2 * np.sin(1.5 * self.time) + 0.4 * np.sin(6.0 * self.time))
-        Vcy = self.config.disturbance_amplitude_y * (1.0 + 1.0 * np.cos(1.3 * self.time) + 0.5 * np.sin(5.5 * self.time))
-        return Vcx, Vcy
-    
-    def _get_derivatives(self, u): # Note: Could pull the observer into another class that does state estimation
-        tr = np.clip(u[0], -100, 100) 
-        tl = np.clip(u[1], -100, 100)
 
-        Vcx, Vcy = self._current()
-        
-        du = (1/M_U) * ((tl + tr) - D_U*self.state.surge + M_V*self.state.sway*self.state.yaw_rate)
-        dv = (1/M_V) * (-D_V*self.state.sway - M_U*self.state.surge*self.state.yaw_rate)
-        dr = (1/I_Z) * (0.5*B*(tr - tl) - D_R*self.state.yaw_rate)
+    # ------------------------------------------------------------------
+    # Public disturbance accessor
+    # ------------------------------------------------------------------
+    def get_current_disturbance(self) -> np.ndarray:
+        """Returns the body-frame disturbance acceleration at the current sim time."""
+        return self.disturbance.get_disturbance(self.time, self.eta[2])
 
-        dx = self.state.surge*np.cos(self.state.psi) - self.state.sway*np.sin(self.state.psi) + Vcx
-        dy = self.state.surge*np.sin(self.state.psi) + self.state.sway*np.cos(self.state.psi) + Vcy
-        dpsi = self.state.yaw_rate
+    # ------------------------------------------------------------------
+    # Integration
+    # ------------------------------------------------------------------
+    def _rk4(self, v, u, dist_accel):
+        """RK4 with a fixed disturbance snapshot (computed once per step)."""
+        def dynamics_func(_v, _u):
+            return self.model.dynamics(_v, _u) + dist_accel
 
-        return OtterState(dx, dy, dpsi, du, dv, dr)
-    
+        k1 = dynamics_func(v, u)
+        k2 = dynamics_func(v + 0.5 * self.dt * k1, u)
+        k3 = dynamics_func(v + 0.5 * self.dt * k2, u)
+        k4 = dynamics_func(v + self.dt * k3, u)
+        return v + (self.dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+
     def step(self, u):
-        self.time += self.config.integration_step
-        # Use 2nd-order integrator (RK2) for better accuracy
-        dt = self.config.integration_step
-        k1 = self._get_derivatives(u)
-        temp_state = self.state + k1 * 0.5 * dt 
-        old_state = self.state
-        self.state = temp_state
-        k2 = self._get_derivatives(u)
-        self.state = old_state + k2 * dt
+        """Advance the simulator by one dt."""
+        dist_accel = self.get_current_disturbance()   
+        self.v = self._rk4(self.v, u, dist_accel)
+        eta_dot = self.model.kinematics(self.eta[2], self.v)
+        self.eta = self.eta + eta_dot * self.dt
+        self.eta[2] = (self.eta[2] + np.pi) % (2 * np.pi) - np.pi
+
+        self.time += self.dt 

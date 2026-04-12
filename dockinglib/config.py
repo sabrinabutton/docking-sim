@@ -1,74 +1,81 @@
 import yaml 
+import numpy as np
 from dataclasses import dataclass
-from typing import List
-from .data import OtterState, Pose
+from typing import List, Union
       
 @dataclass
 class ManeuverConfig:
-    interpolation_count: int
-    max_curvature: float
-    min_arc_length: float
+    capture_radius: float
     
 @dataclass
+class ModelConfig:
+    mass: float
+    length: float
+    width: float
+    surge_period: float
+    yaw_period: float
+    cg_to_pontoon: float
+    thrust_coeff: float
+       
+@dataclass
 class MPCConfig:
-    lookahead_steps: int
+    horizon: int
     dt: float
-    max_solver_iterations: int
+    max_multirate_iterations: int
+    max_singleshot_iterations: int
+
 
 @dataclass
 class WeightConfig:
-    maneuver_length: float
-    curvature_violation: float
-    cross_track: float
-    heading: float
-    angular_velocity: float
-    control_effort: float
+    Q_eta_pos: float
+    Q_eta_psi: float
+    Q_v_surge: float
+    Q_v_sway: float
+    Q_v_yaw: float
+    Q_u: float
+    W_length: float
+    W_p_diff_R: float
+    W_p_diff_Theta: float
+    W_collapse: float
      
 @dataclass
 class SimulationConfig:
-    total_timesteps: int
-    integration_step: float
-    enable_noise: bool
-    start_state: OtterState
-    dock_pose: Pose
-    disturbance_amplitude_x: float
-    disturbance_amplitude_y: float
-    waypoint_tolerance: float
+  initial_maneuver_params: Union[List[float], np.ndarray]
+  initial_position: Union[List[float], np.ndarray]
+  target_dock: Union[List[float], np.ndarray]
+  max_steps: 500
+  multirate_replanning_interval: 10
+  dt: 0.1
     
 @dataclass
-class VisualizerConfig:
-    timestep_skip: int
-    boat_length: float
-    boat_width: float
+class DisturbanceConfig:
+    preset: str
+    active: bool
+    magnitude: float
+    base_dir: float
+    sweep_angle: float
+    freq: float
+    yaw_mag: float
 
 @dataclass
 class SystemConfig:
     maneuver_generator: ManeuverConfig
+    model: ModelConfig
     mpc: MPCConfig
     weights: WeightConfig
     simulation: SimulationConfig
-    viz: VisualizerConfig
-
+    disturbances: DisturbanceConfig
+    
     @classmethod
     def from_yaml(cls, path:str):
         with open(path, 'r') as f:
                 data = yaml.safe_load(f)
-                
-        # Sim config needs special unpacking because it uses other dataclasses
-        sim_data = data['simulation']
-    
-        # Convert start state mapping from YAML into OtterState dataclass
-        if isinstance(sim_data['start_state'], dict):
-            sim_data['start_state'] = OtterState(**sim_data['start_state'])
-            
-        if isinstance(sim_data['dock_pose'], dict):
-            sim_data['dock_pose'] = Pose(**sim_data['dock_pose'])
-        
-        # Auto unpack everything else and return
+   
         return cls(
             maneuver_generator=ManeuverConfig(**data['maneuver_generator']),
             mpc=MPCConfig(**data['mpc']),
+            model=ModelConfig(**data['model']),
             weights=WeightConfig(**data['weights']),
-            simulation=SimulationConfig(**sim_data),
-            viz=VisualizerConfig(**data['visualizer'])
+            simulation=SimulationConfig(**data['simulation']),
+            disturbances=DisturbanceConfig(**data['disturbances'])
         )

@@ -1,60 +1,132 @@
-from dockinglib.simulator import Simulator
-from dockinglib.mpc import MPCController
-from dockinglib.visualizer import Visualizer
-from dockinglib.config import SystemConfig
-from dockinglib.errtrack import ErrorTracker  # Import ErrorTracker
-from dockinglib.path import ManeuverGenerator
-from dockinglib.data import Pose, Status, PointType
+import os
+import copy
+import time
 import numpy as np
+from datetime import datetime
+from tqdm import tqdm
 
-def spac():
+from dockinglib.simulator import Simulator
+from dockinglib.mpc import SPaCSolver
+from dockinglib.config import SystemConfig
+from dockinglib.model import OtterModel
+from dockinglib.errtrack import ErrorTracker 
+from dockinglib.dgen import DisturbanceGenerator
+from dockinglib.logging import TxtLogger, CSVLogger
+
+def run_simulation(method, sim: Simulator, mpc, global_config):
+    """Core simulation loop. sim owns dt, time, and wind internally."""
+
+    u = np.array([0.0, 0.0], dtype=float)
+    
+    target_dock = np.array(global_config.simulation.target_dock)
+    
+    current_p = np.array(global_config.simulation.initial_maneuver_params)
+    eta_hist, v_hist, u_hist, maneuver_hist = [], [], [], []
+    
+    replan_interval = global_config.simulation.multirate_replanning_interval
+    
+    converged = False
+    converged_step = global_config.simulation.max_steps
+
+    for step in tqdm(range(global_config.simulation.max_steps), desc=f"Running {method}"):
+        # Convergence check
+        distance = np.linalg.norm(sim.eta[0:2] - target_dock[0:2])
+        if distance < 2.0 and np.linalg.norm(sim.v) < 0.2:
+            print(f"\n[{method}] Converged at dock in {step} steps!")
+            converged = True
+            converged_step = step
+            break
+
+        # Disturbance estimate
+        d_current = sim.get_current_disturbance()
+
+        # Solve
+        if method == "vanilla":
+            maneuver = mpc.mgen.generate_maneuver(sim.eta, target_dock, params=current_p)
+            u = mpc.vanilla_solve(sim.eta, sim.v, u, maneuver, d_hat=d_current)
+
+        elif method == "multi-rate":
+            if step % replan_interval == 0:
+                u, current_p = mpc.spac_solve(sim.eta, sim.v, u, target_dock, current_p)
+            maneuver = mpc.mgen.generate_maneuver(sim.eta, target_dock, params=current_p)
+            if step % replan_interval != 0:
+                u = mpc.vanilla_solve(sim.eta, sim.v, u, maneuver, d_hat=d_current)
+
+        elif method == "single-shoot":
+            if step % replan_interval == 0:
+                u, current_p = mpc.nonlinear_spac_solver(sim.eta, sim.v, u, target_dock, current_p)
+            maneuver = mpc.mgen.generate_maneuver(sim.eta, target_dock, params=current_p)
+            if step % replan_interval != 0:
+                u = mpc.vanilla_solve(sim.eta, sim.v, u, maneuver, d_hat=d_current)
+
+        sim.step(u)
+
+        eta_hist.append(copy.deepcopy(sim.eta))
+        v_hist.append(copy.deepcopy(sim.v))
+        u_hist.append(copy.deepcopy(u))
+        maneuver_hist.append(copy.deepcopy(maneuver))
+
+    return eta_hist, v_hist, u_hist, maneuver_hist, converged, converged_step
+
+def run_experiments(methods_to_run=["vanilla", "multi-rate", "single-shoot"], show_plots=True):
+    """Main execution function to run batch comparisons."""
     
     global_config = SystemConfig.from_yaml("config.yaml")
-    sim = Simulator(global_config)
-    mpc = MPCController(global_config)
-    viz = Visualizer(global_config)
-    error_tracker = ErrorTracker() 
+    model = OtterModel(global_config.model)
+    mpc = SPaCSolver(global_config, model)
     
-    status = Status.START
-    start_point = Pose(sim.state.x, sim.state.y, sim.state.psi, status)
-    dock_point = global_config.simulation.dock_pose
+    initial_eta = global_config.simulation.initial_position
+    target_dock = global_config.simulation.target_dock
     
-    # Only used if we do vanilla MPC
-    mgen = ManeuverGenerator(global_config)
-    maneuver = mgen.get_docking_maneuver(start_point, dock_point, [10, 10, 1, 1])
+    timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = os.path.join("data", f"run_{timestamp}")
+    os.makedirs(output_dir, exist_ok=True)
     
-    print("Configs loaded and dock point saved. Starting simulation.")
-    
-    for t in range(global_config.simulation.total_timesteps):
-        if len(maneuver) == 0:
-            status = Status.DONE
-            print(f"[t={t}] Status: {status.name}")
-            break
-        
-        target = maneuver[0]
-        dist = np.hypot(sim.state.x - target.x, sim.state.y - target.y)
-        if dist <= global_config.simulation.waypoint_tolerance:
-            popped_point = maneuver.pop(0)
-            if popped_point.p_type == PointType.SETUP:
-                status = Status.START
-            elif popped_point.p_type == PointType.APPROACH:
-                status = Status.SETUP_ACHIEVED
-            elif popped_point.p_type == PointType.BERTH:
-                status = Status.APPROACH_ACHIEVED
+    print(f"[START] Batch Run: {output_dir}")
+    print(f"[METHODS] {methods_to_run}")
+
+    txt_log = TxtLogger(output_dir)
+    csv_log = CSVLogger(output_dir)
+
+    txt_log.write_header(timestamp, initial_eta, target_dock, mpc, wind_config=None)
+
+    all_results = {}
+
+    for method in methods_to_run:
+        if method not in ["vanilla", "multi-rate", "single-shoot"]:
+            print(f"[WARNING] Unknown method '{method}'. Skipping.")
             continue
 
-        # Compute control for current maneuver
-        #u_control = mpc.solve_with_fixed_maneuver(sim.state, maneuver)
-        u_control, maneuver = mpc.solve(sim.state, dock_point, maneuver, status)
-    
-        error_tracker.record_error(sim.state, maneuver[0], t)  # Record the error
-        sim.step(u_control)
+        start_time = time.time()
+        sim = Simulator(global_config, model)
+        
+        eta_h, v_h, u_h, m_h, converged, steps = run_simulation(
+            method, sim, mpc, global_config
+        )
+        
+        exec_time = time.time() - start_time
 
-        if t % global_config.viz.timestep_skip == 0:
-            viz.update(sim.state, maneuver, dock_point)
-            
-    error_tracker.plot_errors()  # Plot errors after simulation
-    print("Exiting without error.")
-    
+        freq_str = {
+            "vanilla":      "10Hz (Static)",
+            "multi-rate":   "1Hz Plan / 10Hz Track",
+            "single-shoot": "1Hz Single-Shoot",
+        }[method]
+
+        txt_log.log_result(method, converged, steps, exec_time, freq_str)
+        csv_log.save(method, eta_h, v_h, u_h, m_h)        
+
+        all_results[method] = {"eta_hist": eta_h, "v_hist": v_h,
+                               "u_hist": u_h,   "maneuver_hist": m_h}
+        print(f"[LOGS] Completed {method} (Time: {exec_time:.2f}s)\n")
+
+    txt_log.save() 
+    print(f"[DONE] Logged to output directory: {output_dir}/")
+
+    if show_plots and all_results:
+        tracker = ErrorTracker(dt=0.1)
+        tracker.plot_comparison(all_results)
+        import matplotlib.pyplot as plt
+        plt.show(block=True)
+
 if __name__ == "__main__":
-    spac()
+    run_experiments(["vanilla"], show_plots=True)
