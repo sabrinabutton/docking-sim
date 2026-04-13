@@ -1,6 +1,6 @@
 ﻿# Simultaneous Planning and Control (SPaC) Optimization for Docking an Autonomous Surface Vehicle in a Dynamic Environment
 
-<img src="docs/disturbance_compensation_comparison.gif" width="200">
+<img src="docs/disturbance_compensation_comparison.gif" width="400">
 
 ## SPaC Script
 
