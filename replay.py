@@ -3,7 +3,7 @@ import csv
 import json
 import numpy as np
 import matplotlib.pyplot as plt
-import time
+import argparse
 from tqdm import tqdm
 
 from dockinglib.config import SystemConfig
@@ -21,21 +21,18 @@ def load_run_data(folder_path, method_name):
 
     eta_data, v_data, maneuver_data = [], [], []
     
-    # Load ETA
     with open(eta_file, 'r') as f:
         reader = csv.reader(f)
         next(reader) 
         for row in reader:
             eta_data.append(Position(np.array([float(row[0]), float(row[1]), float(row[2])])))
 
-    # Load Velocity
     with open(v_file, 'r') as f:
         reader = csv.reader(f)
         next(reader) 
         for row in reader:
             v_data.append(Velocity(np.array([float(row[0]), float(row[1]), float(row[2])])))
 
-    # Load Maneuver 
     with open(m_file, 'r') as f:
         reader = csv.reader(f)
         next(reader) 
@@ -53,7 +50,6 @@ def play_comparison(folder_path, methods, playback_speed=1.0):
     all_data = {}
     max_frames = 0
     
-    # Load all requested methods
     for m in methods:
         try:
             eta, v, man = load_run_data(folder_path, m)
@@ -68,7 +64,6 @@ def play_comparison(folder_path, methods, playback_speed=1.0):
         print("Error: No valid data found to play.")
         return
 
-    # Setup Visualizer with only the loaded methods
     config = SystemConfig.from_yaml("config.yaml")
     viz = Visualizer(config.model, methods=valid_methods)
     
@@ -88,7 +83,6 @@ def play_comparison(folder_path, methods, playback_speed=1.0):
         state_dict = {}
         
         for m in valid_methods:
-            # If this specific method converged early, hold it at its final frame
             frame_idx = min(i, len(all_data[m]['eta']) - 1)
             
             eta = all_data[m]['eta'][frame_idx]
@@ -110,12 +104,24 @@ def play_comparison(folder_path, methods, playback_speed=1.0):
         plt.show(block=True)
 
 if __name__ == "__main__":
-    
-    TARGET_FOLDER = "data/run_20260412_190813" 
-    
-    # Pass a list of the algorithms you want to compare on the same plot!
-    METHODS_TO_COMPARE = ["vanilla"] 
-    
-    SPEED = 2.0 
-    
-    play_comparison(TARGET_FOLDER, METHODS_TO_COMPARE, playback_speed=SPEED)
+    parser = argparse.ArgumentParser(
+        description="Playback and compare docking algorithm runs.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+
+    # Method flags
+    parser.add_argument("-v", "--vanilla",      action="append_const", dest="methods", const="vanilla",    help="Include vanilla method")
+    parser.add_argument("-m", "--multirate",    action="append_const", dest="methods", const="multirate",  help="Include multirate method")
+    parser.add_argument("-s", "--single-shoot", action="append_const", dest="methods", const="single_shoot", help="Include single shoot method")
+
+    # Configs
+    parser.add_argument("--target_folder", metavar="GSD", required=True, help="Path to the run data folder (e.g. data/run_20260412_190813)")
+    parser.add_argument("--speed", type=float, default=2.0, metavar="SPEED", help="Playback speed multiplier (default: 2.0)")
+
+    args = parser.parse_args()
+
+    methods = args.methods or []
+    if not methods:
+        parser.error("At least one method flag is required: -v, -m, or -s")
+
+    play_comparison(args.target_folder, methods, playback_speed=args.speed)

@@ -4,6 +4,7 @@ import time
 import numpy as np
 from datetime import datetime
 from tqdm import tqdm
+import argparse
 
 from dockinglib.simulator import Simulator
 from dockinglib.mpc import SPaCSolver
@@ -129,4 +130,23 @@ def run_experiments(methods_to_run=["vanilla", "multi-rate", "single-shoot"], sh
         plt.show(block=True)
 
 if __name__ == "__main__":
-    run_experiments(["vanilla"], show_plots=True)
+    parser = argparse.ArgumentParser(
+        description="Simulate an optimization for one or more algorithms.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+
+    # Method flags
+    parser.add_argument("-v", "--vanilla",      action="append_const", dest="methods", const="vanilla",    help="Include vanilla method")
+    parser.add_argument("-m", "--multirate",    action="append_const", dest="methods", const="multirate",  help="Include multirate method")
+    parser.add_argument("-s", "--single-shoot", action="append_const", dest="methods", const="single_shoot", help="Include single shoot method")
+
+    # Configs
+    parser.add_argument("--plot", action="store_true", dest="plot", type=bool, default=False, help="Toggle showing error plots on competion.")
+
+    args = parser.parse_args()
+
+    methods = args.methods or []
+    if not methods:
+        parser.error("At least one method flag is required: -v, -m, or -s")
+    
+    run_experiments(methods, show_plots=args.plot)
