@@ -65,7 +65,8 @@ def play_comparison(folder_path, methods, playback_speed=1.0):
         return
 
     config = SystemConfig.from_yaml("config.yaml")
-    viz = Visualizer(config.model, methods=valid_methods)
+    # To:
+    viz = Visualizer(config.model, methods=valid_methods, folder_path=folder_path)
     
     plt.ion()
     plt.show()
@@ -111,8 +112,8 @@ if __name__ == "__main__":
 
     # Method flags
     parser.add_argument("-v", "--vanilla",      action="append_const", dest="methods", const="vanilla",    help="Include vanilla method")
-    parser.add_argument("-m", "--multirate",    action="append_const", dest="methods", const="multirate",  help="Include multirate method")
-    parser.add_argument("-s", "--single-shoot", action="append_const", dest="methods", const="single_shoot", help="Include single shoot method")
+    parser.add_argument("-m", "--multi-rate",    action="append_const", dest="methods", const="multi-rate",  help="Include multirate method")
+    parser.add_argument("-s", "--single-shoot", action="append_const", dest="methods", const="singl-shoot", help="Include single shoot method")
 
     # Configs
     parser.add_argument("--target_folder", metavar="GSD", required=True, help="Path to the run data folder (e.g. data/run_20260412_190813)")
