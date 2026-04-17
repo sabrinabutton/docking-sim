@@ -6,6 +6,7 @@
 
 import cvxpy as cp
 import numpy as np
+import copy
 from scipy.optimize import minimize
 
 from .mgen import ManeuverGenerator
@@ -13,7 +14,7 @@ from .data import TrajectoryPoint, Position, Velocity
 from .model import OtterModel, R
 from .config import SystemConfig
 
-class SPaCSolver:
+class TrajectoryOptimizer:
 
     def __init__(self, config: SystemConfig, model: OtterModel):
 
@@ -163,9 +164,9 @@ class SPaCSolver:
 
         return cp.Problem(cp.Minimize(cost), constraints), du
 
-    def _spac_geometric_penalty(self, p_guess, p_prev):
+    def _geometric_penalty(self, p_guess, p_prev):
         """
-        Compute the three SPaC geometric penalties:
+        Compute the three geometric penalties:
           1. Arc-length upper-bound  (prefer short paths)
           2. Continuity              (prefer small jumps from p_prev)
           3. Collapse lower-bound    (enforce minimum berth lengths)
@@ -222,8 +223,63 @@ class SPaCSolver:
             return u_val + du[:, 0].value
         except Exception:
             return np.array([0.0, 0.0])
+        
+    def nmpc_solve(self, eta, v, u, trajectory, d_hat=np.zeros(3), dt=0.1):
+        eta_val, v_val, u_val = self._normalize_inputs(eta, v, u)
+        
+        padded_traj = self._pad_trajectory(trajectory, eta_val)
+        U_guess = np.zeros((self.config.horizon, 2)).flatten()
+        
+        def evaluate_nmpc(U):
+            U = U.reshape((self.config.horizon, 2))
+            
+            cost     = 0.0
+            curr_eta = copy.deepcopy(eta_val)
+            curr_v   = copy.deepcopy(v_val)
+            prev_u   = u_val
 
-    def spac_solve(self, eta, v, u_prev, dock_point, p_prev, dt=0.1,
+            for k in range(self.config.horizon):
+                u_k = U[k]
+
+                def dyn(v_, u_): return self.model.dynamics(v_, u_) + d_hat
+
+                k1 = dyn(curr_v, u_k)
+                k2 = dyn(curr_v + 0.5 * dt * k1, u_k)
+                k3 = dyn(curr_v + 0.5 * dt * k2, u_k)
+                k4 = dyn(curr_v + dt * k3, u_k)
+                
+                curr_v   = curr_v + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+                curr_eta = curr_eta + self.model.kinematics(curr_eta[2], curr_v) * dt
+                curr_eta[2] = (curr_eta[2] + np.pi) % (2 * np.pi) - np.pi
+
+                t_eta = self._wrap_target_heading(
+                    np.asarray(padded_traj[k].eta), curr_eta[2]
+                )
+                t_v  = np.asarray(padded_traj[k].v)
+                du   = u_k - prev_u
+
+                eta_error = t_eta - curr_eta
+                v_error   = t_v   - curr_v
+
+                cost += np.dot(eta_error, self.Q_eta @ eta_error)
+                cost += np.dot(v_error,   self.Q_v   @ v_error)
+                cost += np.dot(du,        self.Q_u   @ du)
+
+                if curr_v[0] > 3.0:  cost += 1000 * (curr_v[0] - 3.0)  ** 2
+                if curr_v[0] < -2.0: cost += 1000 * (-2.0 - curr_v[0]) ** 2
+
+                prev_u = u_k
+            return cost
+
+        thrust_bounds = [(-1.0, 1.0)] * (self.config.horizon * 2)
+        opt_result = minimize(evaluate_nmpc, U_guess, method="SLSQP",
+                              bounds=thrust_bounds, options={"maxiter": self.config.max_monolevel_iterations})
+        
+        best_u = opt_result.x.reshape((self.config.horizon, 2))
+        
+        return best_u[0]
+
+    def bilevel_optimization(self, eta, v, u_prev, dock_point, p_prev, dt=0.1,
                    cruise_speed=1.0, reverse_speed=0.5, d_hat=np.zeros(3)):
 
         eta_val, v_val, u_val = self._normalize_inputs(eta, v, u_prev)
@@ -242,13 +298,13 @@ class SPaCSolver:
                 problem.solve(solver=cp.OSQP)
                 if problem.status not in ("optimal", "optimal_inaccurate"):
                     return 1e6
-                return problem.value + self._spac_geometric_penalty(p_guess, p_prev)
+                return problem.value + self._geometric_penalty(p_guess, p_prev)
             except Exception:
                 return 1e6
 
         p_bounds = [(-50.0, -2.0), (0.1, np.pi), (2.0, 50.0), (0.1, np.pi)]
         opt_result = minimize(evaluate_p, p_prev, method="SLSQP",
-                              bounds=p_bounds, options={"maxiter": self.config.max_multirate_iterations})
+                              bounds=p_bounds, options={"maxiter": self.config.max_bilevel_iterations})
         best_p = opt_result.x
 
         final_traj = self._generate_padded_trajectory(
@@ -257,10 +313,8 @@ class SPaCSolver:
         u_opt = self.vanilla_solve(eta, v, u_prev, final_traj)
         return u_opt, best_p
 
-    def nonlinear_spac_solver(self, eta, v, u_prev, dock_point, p_prev, dt=0.1,
+    def monolevel_optimization(self, eta, v, u_prev, dock_point, p_prev, dt=0.1,
                                cruise_speed=1.0, reverse_speed=0.5, d_hat=np.zeros(3)):
-        import copy
-        
         eta_start, v_start, u_prev_val = self._normalize_inputs(eta, v, u_prev)
 
         # Decision vector: Z = [u_flat (horizon x 2), R_a, Theta_a, R_b, Theta_b]
@@ -327,6 +381,6 @@ class SPaCSolver:
             return cost
 
         opt_result = minimize(evaluate_nmpc, Z0, method="SLSQP",
-                              bounds=bounds, options={"maxiter": self.config.max_singleshot_iterations})
+                              bounds=bounds, options={"maxiter": self.config.max_monolevel_iterations})
         best_Z = opt_result.x
         return best_Z[0:2], best_Z[-4:]

@@ -38,7 +38,7 @@ class TxtLogger:
 
         self._lines += [
             "==================================================",
-            "              SPaC RUN SUMMARY REPORT             ",
+            "              RUN SUMMARY REPORT             ",
             "==================================================",
             f"Timestamp:    {timestamp}",
             f"Initial Pose: {initial_eta}",
@@ -91,6 +91,7 @@ class CSVLogger:
         "v":        ["u_surge", "v_sway", "r_yaw"],
         "u":        ["thrust_port", "thrust_stbd"],
         "maneuver": ["raw_trajectory_array"],
+        "disturbances": ["acc_u", "acc_r", "acc_v"]
     }
 
     def __init__(self, output_dir: str):
@@ -137,9 +138,11 @@ class CSVLogger:
         v_hist:       list,
         u_hist:       list,
         maneuver_hist: list,
+        d_hist: list
     ) -> None:
         """Write all four CSV files for a single method in one call."""
         self._write_array_csv(method_name, "eta",      eta_hist)
         self._write_array_csv(method_name, "v",        v_hist)
         self._write_array_csv(method_name, "u",        u_hist)
         self._write_maneuver_csv(method_name, maneuver_hist)
+        self._write_array_csv(method_name, "disturbances", d_hist)

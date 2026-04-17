@@ -21,8 +21,8 @@ class ModelConfig:
 class MPCConfig:
     horizon: int
     dt: float
-    max_multirate_iterations: int
-    max_singleshot_iterations: int
+    max_bilevel_iterations: int
+    max_monolevel_iterations: int
 
 
 @dataclass
@@ -44,16 +44,20 @@ class SimulationConfig:
   initial_position: Union[List[float], np.ndarray]
   target_dock: Union[List[float], np.ndarray]
   max_steps: 500
-  multirate_replanning_interval: 10
+  bilevel_replanning_interval: 10
   dt: 0.1
     
 @dataclass
 class DisturbanceConfig:
-    preset: str
-    active: bool
-    magnitude: float
-    base_dir: float
-    sweep_angle: float
+    preset: str = 'semilinear_winds'
+    active: bool = True
+    magnitude: float = 0.4
+    base_dir: float = np.pi/2
+    sweep_angle: float = np.pi/8
+    yaw_mag: float = 0.0
+    
+@dataclass
+class WindConfig:
     freq: float
     yaw_mag: float
 

@@ -1,6 +1,6 @@
 """
     Optimizes Q (control) and W (maneuver) weights using differential evolution
-    on the multi-rate spac framework. 
+    on the bilevel framework. 
     
     Outputs optimal weights to 'weights.yaml' 
 """
@@ -9,7 +9,7 @@ import numpy as np
 from scipy.optimize import differential_evolution
 import yaml
 
-from dockinglib.mpc import SPaCSolver
+from dockinglib.trajopt import TrajectoryOptimizer
 from dockinglib.config import SystemConfig
 from dockinglib.model import OtterModel
 
@@ -23,7 +23,7 @@ def objective_function(params, global_config, model):
     Q_v = np.diag([params[2], params[3], params[4]])
     Q_u = np.diag([params[5], params[5]])
 
-    mpc = SPaCSolver(global_config, model, Q_eta=Q_eta, Q_v=Q_v, Q_u=Q_u)
+    mpc = TrajectoryOptimizer(global_config, model, Q_eta=Q_eta, Q_v=Q_v, Q_u=Q_u)
     mpc.W_length = params[6]
     mpc.W_p_diff = np.array([params[7], params[8], params[7], params[8]])
     mpc.W_collapse = params[9]
@@ -44,7 +44,7 @@ def objective_function(params, global_config, model):
     
     for step in range(500):
         if step % replan_interval == 0:
-            u, current_p = mpc.spac_solve(
+            u, current_p = mpc.bilevel_optimization(
                 eta, v, u, target_dock, current_p, 
                 dt=dt, cruise_speed=1.0, reverse_speed=0.5
             )
@@ -138,7 +138,7 @@ def run_overnight_tuner():
         (50.0, 500.0),  # Q_sway
         (1.0, 100.0),   # Q_yaw
         (0.1, 50.0),    # Q_u
-        # --- SPaC Weights ---
+        # --- Planner Weights ---
         (1.0, 100.0),   # W_length
         (1.0, 100.0),   # W_diff_R
         (10.0, 500.0),  # W_diff_Theta

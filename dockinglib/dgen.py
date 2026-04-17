@@ -39,6 +39,7 @@ class DisturbanceGenerator:
     def __init__(self, config:DisturbanceConfig):
         
         self.config = config
+        self.freq = 1.0 
         
         if(presets[self.config.preset] is not None):
             self.active = presets[self.config.preset]["active"]
@@ -51,7 +52,6 @@ class DisturbanceGenerator:
             self.magnitude = self.config.magnitude  
             self.base_dir = self.config.base_dir    
             self.sweep_angle = self.config.sweep_angle 
-            self.freq = self.config.freq 
             self.yaw_mag = self.config.yaw_mag
 
     def get_disturbance(self, t, psi):
